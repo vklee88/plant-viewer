@@ -351,13 +351,9 @@ export default function PlantTracker() {
     makePlant("My Plant 3", "🌵", 2),
   ];
 
-  const loadLocal = () => {
-    try { const s = localStorage.getItem(STORAGE_KEY); return s ? JSON.parse(s) : null; }
-    catch { return null; }
-  };
+  const [plants, setPlants] = useState(defaultPlants);
+  const [activePlant, setActivePlant] = useState(0);
 
-  const [plants, setPlants] = useState(() => loadLocal()?.plants || defaultPlants);
-  const [activePlant, setActivePlant] = useState(() => loadLocal()?.activePlant || 0);
   const [editingName, setEditingName] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [saveStatus, setSaveStatus] = useState(null); // null | "saving" | "saved" | "error"
@@ -381,22 +377,9 @@ export default function PlantTracker() {
         if (!res.ok) return;
         const remote = await res.json();
         if (!remote?.plants) return;
-        // Merge: remote has scores/notes, local has images
-        const local = loadLocal();
-        const merged = remote.plants.map((rp, i) => {
-          const lp = local?.plants?.[i];
-          return {
-            ...rp,
-            weeks: rp.weeks.map((rw, j) => ({
-              ...rw,
-              image: lp?.weeks?.[j]?.image ?? null,
-              aiResult: lp?.weeks?.[j]?.aiResult ?? null,
-            })),
-          };
-        });
-        setPlants(merged);
+        setPlants(remote.plants);
         setActivePlant(remote.activePlant ?? 0);
-      } catch { /* offline or API not set up yet */ }
+      } catch { /* offline */ }
     })();
   }, []);
 
