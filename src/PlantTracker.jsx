@@ -172,58 +172,89 @@ function AIAnalysis({ image, onResult, accentColor = "#16a34a" }) {
       const base64 = image.includes(",") ? image.split(",")[1] : image;
       if (!base64 || base64.length < 100) throw new Error("Image missing — please re-upload.");
 
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { inline_data: { mime_type: "image/jpeg", data: base64 } },
-              { text: AI_PROMPT },
-            ],
-          }],
-        }),
-      });
+      let response;
+      try {
+        response = await fetch("/api/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { inline_data: { mime_type: "image/jpeg", data: base64 } },
+                { text: AI_PROMPT },
+              ],
+            }],
+          }),
+        });
+      } catch (e) {
+        throw new Error("Network error — check your connection and try again.");
+      }
 
       if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err?.error?.message || "HTTP " + response.status);
+        let message = `Server error (${response.status})`;
+        try {
+          const err = await response.json();
+          message = err?.error || message;
+        } catch { /* ignore */ }
+        throw new Error(message);
       }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let accumulated = "";
+      let timedOut = false;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        reader.cancel();
+      }, 30000); // 30s timeout
 
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("\n");
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (timedOut) throw new Error("Request timed out — please try again.");
 
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const json = line.slice(6).trim();
-          if (!json || json === "[DONE]") continue;
-          try {
-            const parsed = JSON.parse(json);
-            const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (text) accumulated += text;
-          } catch { /* partial chunk, skip */ }
+          const lines = decoder.decode(value, { stream: true }).split("\n");
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            const json = line.slice(6).trim();
+            if (!json || json === "[DONE]") continue;
+            try {
+              const parsed = JSON.parse(json);
+              const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (text) accumulated += text;
+
+              // Check for safety blocks
+              const finishReason = parsed.candidates?.[0]?.finishReason;
+              if (finishReason === "SAFETY") throw new Error("Response blocked by safety filter.");
+              if (finishReason === "RECITATION") throw new Error("Response blocked due to recitation policy.");
+            } catch (e) {
+              if (e.message.includes("blocked")) throw e;
+              // otherwise it's a partial chunk, skip
+            }
+          }
         }
+      } finally {
+        clearTimeout(timeout);
       }
 
-      // Extract JSON from accumulated text
+      if (!accumulated) throw new Error("Empty response from Gemini — please try again.");
+
+      // Extract JSON
       let s = -1, depth = 0, jsonStr = null;
       for (let i = 0; i < accumulated.length; i++) {
         if (accumulated[i] === "{") { if (depth === 0) s = i; depth++; }
         else if (accumulated[i] === "}") { depth--; if (depth === 0 && s !== -1) { jsonStr = accumulated.slice(s, i + 1); break; } }
       }
-      if (!jsonStr) throw new Error("No JSON in reply: " + accumulated.slice(0, 200));
+      if (!jsonStr) throw new Error("Could not parse AI response — please try again.");
 
       let parsed;
       try { parsed = JSON.parse(jsonStr); }
-      catch { parsed = JSON.parse(jsonStr.replace(/,(\s*[}\]])/g, "$1")); }
+      catch {
+        try { parsed = JSON.parse(jsonStr.replace(/,(\s*[}\]])/g, "$1")); }
+        catch { throw new Error("Malformed JSON in response — please try again."); }
+      }
 
       setResult(parsed);
       if (onResult) onResult(parsed);
