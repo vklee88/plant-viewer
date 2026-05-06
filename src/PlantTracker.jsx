@@ -171,37 +171,37 @@ function AIAnalysis({ image, onResult, accentColor = "#16a34a" }) {
     try {
       const base64 = image.includes(",") ? image.split(",")[1] : image;
       if (!base64 || base64.length < 100) throw new Error("Image missing — please re-upload.");
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
+
+      const response = await fetch("/api/analyze", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-haiku-4-5-20251001",
-          max_tokens: 1024,
-          messages: [{ role: "user", content: [
-              { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64 } },
-              { type: "text", text: AI_PROMPT },
-            ]}],
+          contents: [{
+            parts: [
+              { inline_data: { mime_type: "image/jpeg", data: base64 } },
+              { text: AI_PROMPT },
+            ],
+          }],
         }),
       });
-      const raw = await response.text();
-      let data;
-      try { data = JSON.parse(raw); } catch { throw new Error("HTTP " + response.status + ": " + raw.slice(0, 300)); }
+
+      const data = await response.json();
       if (!response.ok) throw new Error(data?.error?.message || "HTTP " + response.status);
-      const aiText = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("").trim();
-      if (!aiText) throw new Error("AI returned no text.");
+
+      const aiText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      if (!aiText) throw new Error("No response from Gemini.");
+
       let s = -1, depth = 0, jsonStr = null;
       for (let i = 0; i < aiText.length; i++) {
         if (aiText[i] === "{") { if (depth === 0) s = i; depth++; }
         else if (aiText[i] === "}") { depth--; if (depth === 0 && s !== -1) { jsonStr = aiText.slice(s, i + 1); break; } }
       }
       if (!jsonStr) throw new Error("No JSON in reply: " + aiText.slice(0, 200));
+
       let parsed;
       try { parsed = JSON.parse(jsonStr); }
       catch { parsed = JSON.parse(jsonStr.replace(/,(\s*[}\]])/g, "$1")); }
+
       setResult(parsed);
       if (onResult) onResult(parsed);
     } catch (e) {
@@ -314,7 +314,7 @@ export default function PlantTracker() {
   const fileRef = useRef();
   const syncTimer = useRef(null);
 
-  const scheme = PALETTE[plants[activePlant]?.colorIndex % PALETTE.length] || PALETTE[0];
+  const scheme = PALETTE[(plants[activePlant]?.colorIndex ?? activePlant) % PALETTE.length] || PALETTE[0];
   const plant = plants[activePlant];
   const selectedWeek = plant?.selectedWeek ?? 0;
   const current = plant?.weeks[selectedWeek];
@@ -407,9 +407,19 @@ export default function PlantTracker() {
 
   const deletePlant = () => {
     if (plants.length <= 1) return;
+    if (!window.confirm(`Delete "${plant.name}"? All weeks and data will be lost.`)) return;
     const next = plants.filter((_, i) => i !== activePlant);
     setPlants(next);
     setActivePlant(Math.max(0, activePlant - 1));
+  };
+
+  const deleteWeek = () => {
+    if (plant.weeks.length <= 1) return;
+    if (!window.confirm(`Delete Week ${current.weekNumber}? This cannot be undone.`)) return;
+    const newWeeks = plant.weeks
+      .filter((_, i) => i !== selectedWeek)
+      .map((w, i) => ({ ...w, weekNumber: i + 1 }));
+    updatePlant({ weeks: newWeeks, selectedWeek: Math.max(0, selectedWeek - 1) });
   };
 
   const handleImage = (file) => {
@@ -464,7 +474,7 @@ export default function PlantTracker() {
             isActive={i === activePlant}
             onClick={() => { setActivePlant(i); setEditingName(false); }}
             onDelete={deletePlant}
-            colorScheme={PALETTE[p.colorIndex % PALETTE.length]}
+            colorScheme={PALETTE[(p.colorIndex ?? i) % PALETTE.length]}
             canDelete={plants.length > 1}
           />
         ))}
@@ -630,6 +640,15 @@ export default function PlantTracker() {
             <span style={{ fontSize: "24px", lineHeight: 1 }}>+</span>
             <span style={{ fontSize: "10px", fontWeight: "600" }}>Week {plant.weeks.length + 1}</span>
           </button>
+          {plant.weeks.length > 1 && (
+            <button
+              onClick={deleteWeek}
+              style={{ minWidth: "70px", height: "90px", borderRadius: "14px", border: "2px dashed #fca5a5", background: "transparent", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "4px", color: "#ef4444", fontFamily: "inherit" }}
+            >
+              <span style={{ fontSize: "24px", lineHeight: 1 }}>🗑</span>
+              <span style={{ fontSize: "10px", fontWeight: "600" }}>Week {current.weekNumber}</span>
+            </button>
+          )}
         </div>
       </div>
 
