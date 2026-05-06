@@ -185,18 +185,41 @@ function AIAnalysis({ image, onResult, accentColor = "#16a34a" }) {
         }),
       });
 
-      const data = await response.json();
-      if (!response.ok) throw new Error(data?.error?.message || "HTTP " + response.status);
-
-      const aiText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-      if (!aiText) throw new Error("No response from Gemini.");
-
-      let s = -1, depth = 0, jsonStr = null;
-      for (let i = 0; i < aiText.length; i++) {
-        if (aiText[i] === "{") { if (depth === 0) s = i; depth++; }
-        else if (aiText[i] === "}") { depth--; if (depth === 0 && s !== -1) { jsonStr = aiText.slice(s, i + 1); break; } }
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err?.error?.message || "HTTP " + response.status);
       }
-      if (!jsonStr) throw new Error("No JSON in reply: " + aiText.slice(0, 200));
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split("\n");
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const json = line.slice(6).trim();
+          if (!json || json === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(json);
+            const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (text) accumulated += text;
+          } catch { /* partial chunk, skip */ }
+        }
+      }
+
+      // Extract JSON from accumulated text
+      let s = -1, depth = 0, jsonStr = null;
+      for (let i = 0; i < accumulated.length; i++) {
+        if (accumulated[i] === "{") { if (depth === 0) s = i; depth++; }
+        else if (accumulated[i] === "}") { depth--; if (depth === 0 && s !== -1) { jsonStr = accumulated.slice(s, i + 1); break; } }
+      }
+      if (!jsonStr) throw new Error("No JSON in reply: " + accumulated.slice(0, 200));
 
       let parsed;
       try { parsed = JSON.parse(jsonStr); }
