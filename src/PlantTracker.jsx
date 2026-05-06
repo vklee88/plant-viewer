@@ -1,0 +1,582 @@
+import { useState, useRef, useCallback, useEffect } from "react";
+
+const CATEGORIES = ["Leaf Color", "Stem Health", "Soil Moisture", "Pest Signs", "Growth", "Overall"];
+const SCORE_LABELS = ["Poor", "Fair", "Good", "Great", "Excellent"];
+const SCORE_COLORS = ["#ef4444", "#f97316", "#eab308", "#84cc16", "#22c55e"];
+const STORAGE_KEY = "plant-tracker-v1";
+
+const PLANT_COLORS = [
+  { bg: "linear-gradient(135deg, #052e16 0%, #14532d 60%, #166534 100%)", accent: "#4ade80", muted: "#86efac", dot: "#16a34a" },
+  { bg: "linear-gradient(135deg, #4a0010 0%, #881337 60%, #9f1239 100%)", accent: "#fb7185", muted: "#fda4af", dot: "#e11d48" },
+  { bg: "linear-gradient(135deg, #1e1b4b 0%, #3730a3 60%, #4338ca 100%)", accent: "#a5b4fc", muted: "#c7d2fe", dot: "#6366f1" },
+];
+
+const AI_PROMPT = "Analyze this plant image. Reply with ONLY valid JSON, no extra text: {" +
+  '"overallHealth":"Good","score":3,"summary":"describe plant health in 2 sentences",' +
+  '"categories":{' +
+    '"Leaf Color":{"score":3,"note":"observation"},' +
+    '"Stem Health":{"score":3,"note":"observation"},' +
+    '"Soil Moisture":{"score":3,"note":"observation"},' +
+    '"Pest Signs":{"score":5,"note":"observation"},' +
+    '"Growth":{"score":3,"note":"observation"},' +
+    '"Overall":{"score":3,"note":"observation"}' +
+  '},' +
+  '"issues":["list any problems"],' +
+  '"advice":["action 1","action 2","action 3"]' +
+  "}";
+
+// ── Image utility: convert any format to compressed JPEG at upload time ─────────
+function convertToJpeg(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      let { width, height } = img;
+      const MAX_DIM = 1600;
+      if (width > MAX_DIM || height > MAX_DIM) {
+        const ratio = Math.min(MAX_DIM / width, MAX_DIM / height);
+        width = Math.round(width * ratio);
+        height = Math.round(height * ratio);
+      }
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(img, 0, 0, width, height);
+      let quality = 0.82;
+      const tryNext = () => {
+        const out = canvas.toDataURL("image/jpeg", quality);
+        const bytes = Math.round((out.length * 3) / 4);
+        if (bytes <= 4 * 1024 * 1024 || quality <= 0.2) resolve(out);
+        else { quality = Math.round((quality - 0.1) * 10) / 10; tryNext(); }
+      };
+      tryNext();
+    };
+    img.onerror = () => reject(new Error("Could not load image."));
+    img.src = dataUrl;
+  });
+}
+
+// ── ScoreSelector ─────────────────────────────────────────────────────────────
+function ScoreSelector({ value, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+      {[1, 2, 3, 4, 5].map((s) => (
+        <button
+          key={s}
+          onClick={() => onChange(s)}
+          style={{
+            width: "36px", height: "36px", borderRadius: "50%", border: "2px solid",
+            borderColor: value === s ? SCORE_COLORS[s - 1] : "#d1d5db",
+            background: value === s ? SCORE_COLORS[s - 1] : "transparent",
+            color: value === s ? "#fff" : "#6b7280",
+            fontWeight: "700", fontSize: "13px", cursor: "pointer",
+            transition: "all 0.15s", fontFamily: "inherit",
+          }}
+        >
+          {s}
+        </button>
+      ))}
+      {value ? (
+        <span style={{ alignSelf: "center", fontSize: "12px", color: SCORE_COLORS[value - 1], fontWeight: "600" }}>
+          {SCORE_LABELS[value - 1]}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+// ── WeekCard ──────────────────────────────────────────────────────────────────
+function WeekCard({ week, onSelect, isSelected, accentColor = "#16a34a" }) {
+  const vals = Object.values(week.scores || {});
+  const avg = vals.length > 0
+    ? Math.round((vals.reduce((a, b) => a + b, 0) / CATEGORIES.length) * 10) / 10
+    : null;
+  const color = avg ? SCORE_COLORS[Math.round(avg) - 1] : "#9ca3af";
+
+  return (
+    <div
+      onClick={() => onSelect(week)}
+      style={{
+        background: isSelected ? "#111827" : "#fff",
+        border: `2px solid ${isSelected ? accentColor : "#e5e7eb"}`,
+        borderRadius: "14px", padding: "14px 16px", cursor: "pointer",
+        transition: "all 0.2s", minWidth: "90px",
+        boxShadow: isSelected ? `0 0 0 3px ${accentColor}44` : "none",
+      }}
+    >
+      <div style={{ fontSize: "11px", fontWeight: "700", color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+        Week
+      </div>
+      <div style={{ fontSize: "26px", fontWeight: "800", color: isSelected ? "#fff" : "#111827", lineHeight: 1 }}>
+        {week.weekNumber}
+      </div>
+      <div style={{ marginTop: "6px", display: "flex", alignItems: "center", gap: "4px" }}>
+        <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: color }} />
+        <span style={{ fontSize: "12px", fontWeight: "600", color: isSelected ? "#d1d5db" : color }}>
+          {avg ? avg.toFixed(1) : "—"}
+        </span>
+      </div>
+      {week.image && (
+        <div style={{ marginTop: "8px", width: "100%", height: "50px", borderRadius: "8px", overflow: "hidden" }}>
+          <img src={week.image} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── PlantTab ──────────────────────────────────────────────────────────────────
+function PlantTab({ plant, isActive, onClick, colorScheme }) {
+  const latestWeek = plant.weeks[plant.weeks.length - 1];
+  const vals = Object.values(latestWeek?.scores || {});
+  const avg = vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        flex: 1, padding: "10px 8px", borderRadius: "12px", cursor: "pointer",
+        background: isActive ? colorScheme.dot : "#f3f4f6",
+        transition: "all 0.2s", textAlign: "center",
+        boxShadow: isActive ? `0 4px 14px ${colorScheme.dot}55` : "none",
+      }}
+    >
+      <div style={{ fontSize: "20px", lineHeight: 1 }}>{plant.emoji}</div>
+      <div style={{ fontSize: "11px", fontWeight: "700", color: isActive ? "#fff" : "#6b7280", marginTop: "3px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+        {plant.name}
+      </div>
+      {avg && (
+        <div style={{ fontSize: "10px", color: isActive ? "rgba(255,255,255,0.8)" : "#9ca3af", fontWeight: "600" }}>
+          {avg.toFixed(1)}/5
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── AIAnalysis ────────────────────────────────────────────────────────────────
+function AIAnalysis({ image, onResult, accentColor = "#16a34a" }) {
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+
+  const analyze = useCallback(async () => {
+    if (!image) return;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+
+    try {
+      const base64 = image.includes(",") ? image.split(",")[1] : image;
+      if (!base64 || base64.length < 100) throw new Error("Image missing — please re-upload.");
+
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 1024,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64 } },
+              { type: "text", text: AI_PROMPT },
+            ],
+          }],
+        }),
+      });
+
+      const raw = await response.text();
+      let data;
+      try { data = JSON.parse(raw); } catch { throw new Error("HTTP " + response.status + ": " + raw.slice(0, 300)); }
+      if (!response.ok) throw new Error((data?.error?.message) || ("HTTP " + response.status));
+
+      const aiText = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("").trim();
+      if (!aiText) throw new Error("AI returned no text. Content blocks: " + JSON.stringify(data.content || []));
+
+      let s = -1, depth = 0, jsonStr = null;
+      for (let i = 0; i < aiText.length; i++) {
+        if (aiText[i] === "{") { if (depth === 0) s = i; depth++; }
+        else if (aiText[i] === "}") { depth--; if (depth === 0 && s !== -1) { jsonStr = aiText.slice(s, i + 1); break; } }
+      }
+      if (!jsonStr) throw new Error("No JSON in reply: " + aiText.slice(0, 200));
+
+      let parsed;
+      try { parsed = JSON.parse(jsonStr); }
+      catch { parsed = JSON.parse(jsonStr.replace(/,(\s*[}\]])/g, "$1")); }
+
+      setResult(parsed);
+      if (onResult) onResult(parsed);
+    } catch (e) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setLoading(false);
+    }
+  }, [image, onResult]);
+
+  const healthColors = {
+    Excellent: "#16a34a", Good: "#65a30d", Fair: "#ca8a04", Poor: "#ea580c", Critical: "#dc2626",
+  };
+
+  return (
+    <div style={{ marginTop: "20px" }}>
+      <button
+        onClick={analyze}
+        disabled={!image || loading}
+        style={{
+          width: "100%", padding: "14px", borderRadius: "12px", border: "none",
+          background: image && !loading ? `linear-gradient(135deg, ${accentColor}, ${accentColor}cc)` : "#e5e7eb",
+          color: image && !loading ? "#fff" : "#9ca3af",
+          fontWeight: "700", fontSize: "15px", cursor: image && !loading ? "pointer" : "not-allowed",
+          fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+          transition: "all 0.2s", boxShadow: image && !loading ? `0 4px 14px ${accentColor}44` : "none",
+        }}
+      >
+        {loading ? (
+          <>
+            <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>🌿</span>
+            Analyzing your plant...
+          </>
+        ) : "🔬 AI Diagnose Plant"}
+      </button>
+
+      {error && (
+        <div style={{ marginTop: "12px", padding: "12px", background: "#fef2f2", borderRadius: "10px", border: "1px solid #fca5a5" }}>
+          <div style={{ fontSize: "11px", fontWeight: "700", color: "#991b1b", marginBottom: "6px" }}>⚠ Error — please copy and share this:</div>
+          <div style={{ fontSize: "11px", fontFamily: "monospace", color: "#dc2626", whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: "180px", overflowY: "auto", userSelect: "all", cursor: "text" }}>
+            {error}
+          </div>
+        </div>
+      )}
+
+      {result && (
+        <div style={{ marginTop: "16px", animation: "fadeIn 0.4s ease" }}>
+          <div style={{ background: "linear-gradient(135deg, #f0fdf4, #dcfce7)", borderRadius: "14px", padding: "18px", border: "1px solid #bbf7d0" }}>
+
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" }}>
+              <span style={{ fontSize: "14px", fontWeight: "700", color: "#166534" }}>AI Diagnosis</span>
+              <span style={{ padding: "4px 12px", borderRadius: "20px", fontSize: "12px", fontWeight: "700", background: healthColors[result.overallHealth] || "#6b7280", color: "#fff" }}>
+                {result.overallHealth} · {result.score}/5
+              </span>
+            </div>
+
+            <p style={{ fontSize: "14px", color: "#374151", lineHeight: 1.6, margin: "0 0 14px 0" }}>
+              {result.summary}
+            </p>
+
+            {result.categories && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "14px" }}>
+                {Object.entries(result.categories).map(([cat, val]) => (
+                  <div key={cat} style={{ background: "#fff", borderRadius: "10px", padding: "10px 12px", border: "1px solid #d1fae5" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+                      <span style={{ fontSize: "11px", fontWeight: "700", color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em" }}>{cat}</span>
+                      <span style={{ fontSize: "12px", fontWeight: "800", color: SCORE_COLORS[(val.score || 1) - 1] }}>{val.score}/5</span>
+                    </div>
+                    <div style={{ fontSize: "12px", color: "#374151" }}>{val.note}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {result.issues?.length > 0 && (
+              <div style={{ marginBottom: "12px" }}>
+                <div style={{ fontSize: "12px", fontWeight: "700", color: "#92400e", marginBottom: "6px" }}>⚠ Issues Detected</div>
+                {result.issues.map((issue, i) => (
+                  <div key={i} style={{ fontSize: "13px", color: "#78350f", padding: "4px 0", display: "flex", gap: "6px" }}>
+                    <span>•</span><span>{issue}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {result.advice?.length > 0 && (
+              <div style={{ background: "linear-gradient(135deg, #052e16, #14532d)", borderRadius: "12px", padding: "16px", border: "1px solid #16a34a" }}>
+                <div style={{ fontSize: "12px", fontWeight: "800", color: "#86efac", letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: "12px", display: "flex", alignItems: "center", gap: "6px" }}>
+                  <span>📋</span> Next Week Actions
+                </div>
+                {result.advice.map((tip, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: "10px", padding: "10px 12px", background: "rgba(255,255,255,0.07)", borderRadius: "10px", marginBottom: "8px", border: "1px solid rgba(134,239,172,0.2)" }}>
+                    <div style={{ minWidth: "24px", height: "24px", borderRadius: "50%", background: "#16a34a", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px", fontWeight: "800", color: "#fff", flexShrink: 0 }}>
+                      {i + 1}
+                    </div>
+                    <span style={{ fontSize: "13px", color: "#d1fae5", lineHeight: 1.5 }}>{tip}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+export default function PlantTracker() {
+  const makeWeek = (n) => ({ weekNumber: n, scores: {}, image: null, aiResult: null, date: new Date().toLocaleDateString() });
+  const makePlant = (name, emoji) => ({ name, emoji, weeks: [makeWeek(1)], selectedWeek: 0 });
+
+  const defaultPlants = [
+    makePlant("My Plant 1", "🌿"),
+    makePlant("My Plant 2", "🌸"),
+    makePlant("My Plant 3", "🌵"),
+  ];
+
+  const loadFromStorage = () => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      return saved ? JSON.parse(saved) : null;
+    } catch { return null; }
+  };
+
+  const [plants, setPlants] = useState(() => loadFromStorage()?.plants || defaultPlants);
+  const [activePlant, setActivePlant] = useState(() => loadFromStorage()?.activePlant || 0);
+  const [editingName, setEditingName] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [saveStatus, setSaveStatus] = useState(null);
+  const fileRef = useRef();
+
+  const scheme = PLANT_COLORS[activePlant];
+  const plant = plants[activePlant];
+  const selectedWeek = plant.selectedWeek;
+  const current = plant.weeks[selectedWeek];
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ plants, activePlant }));
+      setSaveStatus("saved");
+      const t = setTimeout(() => setSaveStatus(null), 1800);
+      return () => clearTimeout(t);
+    } catch { /* storage unavailable */ }
+  }, [plants, activePlant]);
+
+  const updatePlant = (patch) =>
+    setPlants((ps) => ps.map((p, i) => (i === activePlant ? { ...p, ...patch } : p)));
+
+  const updateCurrent = (weekPatch) =>
+    setPlants((ps) =>
+      ps.map((p, i) =>
+        i === activePlant
+          ? { ...p, weeks: p.weeks.map((w, j) => (j === p.selectedWeek ? { ...w, ...weekPatch } : w)) }
+          : p
+      )
+    );
+
+  const setSelectedWeek = (wi) => updatePlant({ selectedWeek: wi });
+
+  const addWeek = () => {
+    const newWeeks = [...plant.weeks, makeWeek(plant.weeks.length + 1)];
+    updatePlant({ weeks: newWeeks, selectedWeek: newWeeks.length - 1 });
+  };
+
+  const handleImage = (file) => {
+    if (!file) return;
+    // Always convert via canvas — no raw fallback, so we always send clean JPEG
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const jpeg = await convertToJpeg(e.target.result);
+        // Verify it starts with data:image/jpeg
+        if (!jpeg.startsWith("data:image/jpeg")) {
+          throw new Error("Conversion did not produce JPEG");
+        }
+        updateCurrent({ image: jpeg, aiResult: null });
+      } catch (err) {
+        // Show the error rather than silently storing bad data
+        alert("Could not process image: " + err.message + ". Please try a different photo.");
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (file?.type.startsWith("image/")) handleImage(file);
+  };
+
+  const avgScore =
+    current.scores && Object.keys(current.scores).length > 0
+      ? Object.values(current.scores).reduce((a, b) => a + b, 0) / Object.values(current.scores).length
+      : null;
+
+  const trendData = plant.weeks.map((w) => {
+    const vals = Object.values(w.scores || {});
+    return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+  });
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#f8faf9", fontFamily: "'Lora', 'Georgia', serif" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Lora:wght@400;600;700&display=swap');
+        @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: translateY(0) } }
+        * { box-sizing: border-box; }
+        input:focus, textarea:focus { outline: none; }
+      `}</style>
+
+      {/* Plant tabs */}
+      <div style={{ background: "#fff", padding: "12px 16px", borderBottom: "1px solid #f3f4f6", display: "flex", gap: "8px" }}>
+        {plants.map((p, i) => (
+          <PlantTab
+            key={i}
+            plant={p}
+            isActive={i === activePlant}
+            onClick={() => { setActivePlant(i); setEditingName(false); }}
+            colorScheme={PLANT_COLORS[i]}
+          />
+        ))}
+      </div>
+
+      {/* Header */}
+      <div style={{ background: scheme.bg, padding: "24px 28px 20px", position: "relative", overflow: "hidden", transition: "background 0.4s" }}>
+        <div style={{ position: "absolute", top: "-40px", right: "-40px", width: "200px", height: "200px", borderRadius: "50%", background: "rgba(255,255,255,0.05)" }} />
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
+          <div>
+            <div style={{ fontSize: "11px", fontWeight: "600", color: scheme.muted, letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: "6px" }}>
+              {plant.emoji} Plant Journal
+            </div>
+            {editingName ? (
+              <input
+                autoFocus
+                value={plant.name}
+                onChange={(e) => updatePlant({ name: e.target.value })}
+                onBlur={() => setEditingName(false)}
+                onKeyDown={(e) => e.key === "Enter" && setEditingName(false)}
+                style={{ fontSize: "24px", fontWeight: "700", color: "#fff", background: "transparent", border: "none", borderBottom: `2px solid ${scheme.accent}`, fontFamily: "inherit", width: "220px", paddingBottom: "2px" }}
+              />
+            ) : (
+              <div
+                onClick={() => setEditingName(true)}
+                style={{ fontSize: "24px", fontWeight: "700", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", gap: "8px" }}
+              >
+                {plant.name}
+                <span style={{ fontSize: "14px", color: scheme.accent }}>✎</span>
+              </div>
+            )}
+            <div style={{ fontSize: "13px", color: scheme.muted, marginTop: "4px", display: "flex", alignItems: "center", gap: "8px" }}>
+              Week {current.weekNumber} · {current.date}
+              {saveStatus === "saved" && (
+                <span style={{ fontSize: "10px", background: "rgba(255,255,255,0.15)", color: "#fff", padding: "2px 8px", borderRadius: "20px", fontWeight: "600", animation: "fadeIn 0.3s ease" }}>
+                  ✓ saved
+                </span>
+              )}
+            </div>
+          </div>
+          {avgScore && (
+            <div>
+              <div style={{ width: "58px", height: "58px", borderRadius: "50%", background: `conic-gradient(${scheme.accent} ${(avgScore / 5) * 360}deg, rgba(255,255,255,0.1) 0deg)`, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 0 20px ${scheme.accent}66` }}>
+                <div style={{ width: "44px", height: "44px", borderRadius: "50%", background: "rgba(0,0,0,0.4)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                  <span style={{ fontSize: "16px", fontWeight: "800", color: "#fff", lineHeight: 1 }}>{avgScore.toFixed(1)}</span>
+                  <span style={{ fontSize: "8px", color: scheme.muted }}>avg</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {trendData.some((v) => v !== null) && (
+          <div style={{ marginTop: "16px", display: "flex", alignItems: "flex-end", gap: "4px", height: "32px" }}>
+            {trendData.map((v, i) => (
+              <div
+                key={i}
+                style={{ width: "20px", borderRadius: "3px 3px 0 0", height: v ? `${(v / 5) * 28}px` : "4px", background: i === selectedWeek ? scheme.accent : v ? `${scheme.muted}66` : "#ffffff22", transition: "all 0.3s" }}
+              />
+            ))}
+            <span style={{ fontSize: "10px", color: scheme.muted, marginLeft: "4px", alignSelf: "center" }}>health trend</span>
+          </div>
+        )}
+      </div>
+
+      {/* Week selector */}
+      <div style={{ padding: "16px 20px 0", overflowX: "auto" }}>
+        <div style={{ display: "flex", gap: "10px", alignItems: "center", paddingBottom: "4px" }}>
+          {plant.weeks.map((w, i) => (
+            <WeekCard key={i} week={w} isSelected={i === selectedWeek} onSelect={() => setSelectedWeek(i)} accentColor={scheme.dot} />
+          ))}
+          <button
+            onClick={addWeek}
+            style={{ minWidth: "70px", height: "90px", borderRadius: "14px", border: "2px dashed #d1d5db", background: "transparent", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "4px", color: "#9ca3af", fontFamily: "inherit" }}
+          >
+            <span style={{ fontSize: "24px", lineHeight: 1 }}>+</span>
+            <span style={{ fontSize: "10px", fontWeight: "600" }}>Week {plant.weeks.length + 1}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Main content */}
+      <div style={{ padding: "16px 20px 40px" }}>
+
+        {/* Image upload */}
+        <div
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={handleDrop}
+          onClick={() => !current.image && fileRef.current.click()}
+          style={{ borderRadius: "16px", overflow: "hidden", border: dragOver ? `2px dashed ${scheme.dot}` : "2px dashed #d1d5db", background: dragOver ? "#f0fdf4" : "#fff", cursor: current.image ? "default" : "pointer", transition: "all 0.2s", marginBottom: "16px", minHeight: current.image ? "220px" : "130px", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}
+        >
+          {current.image ? (
+            <>
+              <img src={current.image} alt="plant" style={{ width: "100%", maxHeight: "280px", objectFit: "cover", display: "block" }} />
+              <div style={{ position: "absolute", bottom: "10px", left: "10px", right: "10px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ background: "rgba(0,0,0,0.55)", color: "#d1fae5", fontSize: "10px", padding: "3px 8px", borderRadius: "6px", fontFamily: "monospace" }}>
+                  JPEG · {Math.round(current.image.length * 0.75 / 1024)} KB
+                </span>
+                <button
+                  onClick={(e) => { e.stopPropagation(); fileRef.current.click(); }}
+                  style={{ background: "rgba(0,0,0,0.6)", color: "#fff", border: "none", borderRadius: "8px", padding: "6px 12px", fontSize: "12px", cursor: "pointer", fontFamily: "inherit", fontWeight: "600" }}
+                >
+                  ↩ Replace
+                </button>
+              </div>
+            </>
+          ) : (
+            <div style={{ textAlign: "center", padding: "24px" }}>
+              <div style={{ fontSize: "36px", marginBottom: "8px" }}>📷</div>
+              <div style={{ fontWeight: "600", color: "#374151", fontSize: "15px" }}>Drop a photo or tap to upload</div>
+              <div style={{ color: "#9ca3af", fontSize: "13px", marginTop: "4px" }}>Shows week {current.weekNumber} plant condition</div>
+            </div>
+          )}
+        </div>
+        <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => handleImage(e.target.files[0])} />
+
+        {/* AI Analysis — key resets on plant/week switch */}
+        <AIAnalysis
+          key={`${activePlant}-${selectedWeek}`}
+          image={current.image}
+          accentColor={scheme.dot}
+          onResult={(r) => {
+            const mapped = {};
+            if (r.categories) CATEGORIES.forEach((cat) => { if (r.categories[cat]) mapped[cat] = r.categories[cat].score; });
+            updateCurrent({ aiResult: r, scores: { ...current.scores, ...mapped } });
+          }}
+        />
+
+        {/* Manual scores */}
+        <div style={{ marginTop: "20px" }}>
+          <div style={{ fontSize: "13px", fontWeight: "700", color: "#374151", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "14px" }}>
+            📊 Manual Assessment
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+            {CATEGORIES.map((cat) => (
+              <div key={cat} style={{ background: "#fff", borderRadius: "12px", padding: "14px 16px", border: "1px solid #f3f4f6" }}>
+                <div style={{ fontSize: "13px", fontWeight: "600", color: "#374151", marginBottom: "10px" }}>{cat}</div>
+                <ScoreSelector
+                  value={current.scores?.[cat] || 0}
+                  onChange={(v) => updateCurrent({ scores: { ...current.scores, [cat]: v } })}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
